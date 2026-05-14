@@ -1,7 +1,7 @@
 // ============================================
 // SageHR Document Backup - Playwright Automation
 // Full Backup + Incremental Backup Support
-// Version History + Category Change Detection
+// Every file includes upload date+time in filename
 // ============================================
 
 const { chromium } = require('playwright');
@@ -239,9 +239,6 @@ function needsDownload(manifest, doc) {
 }
 
 function recordInManifest(manifest, doc, savePath) {
-  const existing = manifest.documents[doc.id];
-  const currentVersion = (existing && existing.version) ? existing.version + 1 : 1;
-
   manifest.documents[doc.id] = {
     id: doc.id,
     file_name: doc.file_name,
@@ -249,156 +246,139 @@ function recordInManifest(manifest, doc, savePath) {
     created_at: doc.created_at,
     updated_at: doc.updated_at,
     file_size: doc.file_size,
-    version: currentVersion,
     backed_up_at: new Date().toISOString(),
     local_path: savePath
   };
 }
 
 // ============================================
-// VERSION: Rename old file with version number
-// (Never delete - keep _v1, _v2, etc.)
+// FILENAME: Add upload date+time to every file
+// Format: filename_YYYYMMDD-HHmmss.ext
+// This guarantees unique filenames for every upload
 // ============================================
-function versionOldFile(manifest, docId, currentSavePath) {
-  const existing = manifest.documents[docId];
-  if (!existing || !existing.local_path) return;
+function buildFileName(doc) {
+  const originalName = doc.file_name || `document_${doc.id}`;
+  const ext = path.extname(originalName);
+  const base = path.basename(originalName, ext);
 
-  const oldPath = existing.local_path;
-
-  // Check if old file exists on disk
-  if (!fs.existsSync(oldPath)) return;
-
-  // Build versioned filename
-  // e.g., contract.pdf -> contract_v1.pdf
-  const version = existing.version || 1;
-  const ext = path.extname(oldPath);
-  const base = path.basename(oldPath, ext);
-  const dir = path.dirname(oldPath);
-  const versionedName = `${base}_v${version}${ext}`;
-  const versionedPath = path.join(dir, versionedName);
-
-  // Rename old file to versioned name
-  try {
-    fs.renameSync(oldPath, versionedPath);
-    console.log(`   [VERSION] Kept old version: ${versionedName}`);
-  } catch (e) {
-    console.log(`   [WARN] Could not version old file: ${e.message}`);
+  // Get upload date+time from Sage HR (created_at field)
+  let dateTag = 'unknown';
+  if (doc.created_at) {
+    const d = new Date(doc.created_at);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    dateTag = `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
   }
+
+  return `${base}_${dateTag}${ext}`;
 }
 
 // ============================================
 // CATEGORY CHANGE: Move file if category changed
-// (Avoid duplicates across category folders)
 // ============================================
+
+
 function handleCategoryChange(manifest, doc, newSavePath) {
   const existing = manifest.documents[doc.id];
   if (!existing || !existing.local_path) return false;
 
   const oldPath = existing.local_path;
-  const normalizedOld = path.normalize(oldPath);
-  const normalizedNew = path.normalize(newSavePath);
 
-  // Check if the path is different (category changed)
-  if (normalizedOld === normalizedNew) return false;
+  // ✅ Compare ONLY directory (category), NOT filename
+  const oldDir = path.normalize(path.dirname(oldPath));
+  const newDir = path.normalize(path.dirname(newSavePath));
 
-  // Check if old file exists
+  // ✅ Same category → NOT a real category change
+  if (oldDir === newDir) {
+    return false;
+  }
+
   if (!fs.existsSync(oldPath)) return false;
 
-  // File is in a different folder = category changed
   console.log(`   [MOVE] Category changed for: ${path.basename(oldPath)}`);
-  console.log(`          From: ${path.dirname(oldPath).split(path.sep).slice(-1)}`);
-  console.log(`          To:   ${path.dirname(newSavePath).split(path.sep).slice(-1)}`);
+  console.log(`          From: ${path.basename(oldDir)}`);
+  console.log(`          To:   ${path.basename(newDir)}`);
 
-  // Create new directory if needed
-  const newDir = path.dirname(newSavePath);
   if (!fs.existsSync(newDir)) {
     fs.mkdirSync(newDir, { recursive: true });
   }
 
-  // Move file to new category folder
   try {
     fs.renameSync(oldPath, newSavePath);
     console.log(`   [OK] Moved successfully`);
 
-    // Clean up empty old directory
-    const oldDir = path.dirname(oldPath);
+    // cleanup empty old folder
     try {
-      const remaining = fs.readdirSync(oldDir);
-      if (remaining.length === 0) {
+      if (fs.readdirSync(oldDir).length === 0) {
         fs.rmdirSync(oldDir);
       }
-    } catch (e) { /* ignore cleanup errors */ }
+    } catch {}
 
-    return true; // File moved, no download needed
+    return true;
   } catch (e) {
     console.log(`   [WARN] Could not move file: ${e.message}`);
     return false;
   }
 }
 
-// ============================================
-// STEP 6: Download Document via Browser
-// ============================================
-async function downloadDocument(context, docId, savePath) {
-  // Create directory if it doesn't exist
-  const dir = path.dirname(savePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
 
-  // Skip if file already exists
-  if (fs.existsSync(savePath)) {
-    console.log(`   [SKIP] Already exists: ${path.basename(savePath)}`);
-    return 'skipped';
-  }
-
-  const downloadPage = await context.newPage();
-
-  try {
-    const downloadUrl = `${BASE_URL}/documents/${docId}/download`;
-
-    // Listen for the download event FIRST
-    const downloadPromise = downloadPage.waitForEvent('download', { timeout: 120000 });
-
-    // Navigate - this WILL throw "Download is starting" - that is OK!
-    downloadPage.goto(downloadUrl, { timeout: 120000 }).catch(() => {});
-
-    // Wait for download to actually start
-    const download = await downloadPromise;
-
-    // Save the file to our target path
-    await download.saveAs(savePath);
-
-    // Verify file was saved and has content
-    if (fs.existsSync(savePath)) {
-      const fileSize = fs.statSync(savePath).size;
-
-      if (fileSize < 100) {
-        fs.unlinkSync(savePath);
-        console.log(`   [FAIL] Failed (empty): ${path.basename(savePath)}`);
-        return 'failed';
-      }
-
-      console.log(`   [OK] Downloaded: ${path.basename(savePath)} (${(fileSize / 1024).toFixed(1)} KB)`);
-      return 'downloaded';
-    } else {
-      console.log(`   [FAIL] Failed (not saved): ${path.basename(savePath)}`);
-      return 'failed';
-    }
-
-  } catch (e) {
-    console.log(`   [FAIL] Failed: ${path.basename(savePath)} -- ${e.message}`);
-    return 'failed';
-  } finally {
-    await downloadPage.close().catch(() => {});
-  }
-}
 
 // ============================================
 // STEP 7: Clean filename (remove special chars)
 // ============================================
 function cleanFileName(name) {
   return name.replace(/[<>:"\/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();
+}
+
+// ============================================
+// STEP 8: Download Document via Playwright
+// Uses the download URL and saves with correct filename
+// Handles empty files and download errors
+// ============================================
+async function downloadDocument(context, docId, savePath) {
+  const dir = path.dirname(savePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  if (fs.existsSync(savePath)) {
+    console.log(`   [SKIP] Already exists: ${path.basename(savePath)}`);
+    return 'skipped';
+  }
+
+  const page = await context.newPage();
+
+  try {
+    const downloadUrl = `${BASE_URL}/documents/${docId}/download`;
+
+    const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
+    page.goto(downloadUrl).catch(() => {});
+
+    const download = await downloadPromise;
+    await download.saveAs(savePath);
+
+    const size = fs.statSync(savePath).size;
+    if (size < 100) {
+      fs.unlinkSync(savePath);
+      console.log(`   [FAIL] Empty file: ${path.basename(savePath)}`);
+      return 'failed';
+    }
+
+    console.log(
+      `   [OK] Downloaded: ${path.basename(savePath)} (${(size / 1024).toFixed(1)} KB)`
+    );
+    return 'downloaded';
+
+  } catch (e) {
+    console.log(`   [FAIL] Download error: ${e.message}`);
+    return 'failed';
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 // ============================================
@@ -438,11 +418,9 @@ async function runBackup() {
     acceptDownloads: true
   });
 
-  // Load cookies
   const cookies = JSON.parse(fs.readFileSync(COOKIES_FILE, 'utf8'));
   await context.addCookies(cookies);
 
-  // Navigate to dashboard first (activate Cloudflare session)
   const mainPage = await context.newPage();
   await mainPage.goto(`${BASE_URL}/dashboard`, { waitUntil: 'domcontentloaded' });
   await mainPage.waitForTimeout(3000);
@@ -464,7 +442,6 @@ async function runBackup() {
   let skippedDocs = 0;
   let unchangedDocs = 0;
   let failedDocs = 0;
-  let versionedDocs = 0;
   let movedDocs = 0;
 
   // ---- Process Each Employee ----
@@ -474,7 +451,6 @@ async function runBackup() {
 
     console.log(`\n[EMPLOYEE ${i + 1}/${employees.length}] ${emp.first_name} ${emp.last_name} (ID: ${emp.id})`);
 
-    // Get documents for this employee
     let docs;
     try {
       docs = await getEmployeeDocuments(emp.id);
@@ -492,36 +468,40 @@ async function runBackup() {
 
     totalDocs += docs.length;
 
-    // Download each document
     for (const doc of docs) {
       const categoryName = cleanFileName(categoryMap[doc.document_category_id] || 'Uncategorized');
-      const fileName = cleanFileName(doc.file_name || `document_${doc.id}`);
-      const savePath = path.join(DOWNLOAD_DIR, empFolder, categoryName, fileName);
+
+      // Build filename with upload date+time (guarantees uniqueness)
+      const fileName = cleanFileName(buildFileName(doc));
+      let savePath = path.join(DOWNLOAD_DIR, empFolder, categoryName, fileName);
 
       // ---- CATEGORY CHANGE DETECTION ----
-      // Check if this document was previously in a different category
       const wasMoved = handleCategoryChange(manifest, doc, savePath);
       if (wasMoved) {
         movedDocs++;
         recordInManifest(manifest, doc, savePath);
-        continue; // File moved successfully, no download needed
+        continue;
       }
 
       // ---- INCREMENTAL MODE CHECK ----
       if (isIncremental) {
         const status = needsDownload(manifest, doc);
         if (status === 'skip') {
-          unchangedDocs++;
-          continue;
+          // Even if manifest says skip, check if file exists
+          if (fs.existsSync(savePath)) {
+            unchangedDocs++;
+            continue;
+          } else {
+            console.log(`   [NEW] File missing at path: ${path.basename(savePath)}`);
+          }
         }
         if (status === 'updated') {
-          console.log(`   [UPDATED] ${fileName}`);
-          // VERSION: Rename old file to _v1, _v2 etc. (NEVER delete)
-          versionOldFile(manifest, doc.id, savePath);
-          versionedDocs++;
+          console.log(`   [UPDATED] ${path.basename(savePath)}`);
+          // Old file stays with old timestamp, new file gets new timestamp
+          // No renaming needed - timestamps make them unique!
         }
         if (status === 'new') {
-          console.log(`   [NEW] ${fileName}`);
+          console.log(`   [NEW] ${path.basename(savePath)}`);
         }
       }
 
@@ -536,18 +516,13 @@ async function runBackup() {
         failedDocs++;
       }
 
-      // Small delay to avoid rate limiting
       await mainPage.waitForTimeout(500);
     }
 
-    // Save manifest after each employee (in case of crash)
     saveManifest(manifest);
-
-    // Delay between employees
     await mainPage.waitForTimeout(1000);
   }
 
-  // Final manifest save
   saveManifest(manifest);
 
   // ---- Summary ----
@@ -560,7 +535,6 @@ async function runBackup() {
   console.log(`   Downloaded:          ${downloadedDocs}`);
   console.log(`   Skipped (exists):    ${skippedDocs}`);
   console.log(`   Unchanged:           ${unchangedDocs}`);
-  console.log(`   Versioned (old kept):${versionedDocs}`);
   console.log(`   Moved (cat change):  ${movedDocs}`);
   console.log(`   Failed:              ${failedDocs}`);
   console.log(`   Saved to:            ${path.resolve(DOWNLOAD_DIR)}`);
@@ -572,16 +546,24 @@ async function runBackup() {
 // ============================================
 // CLI: Handle command-line arguments
 // ============================================
+
 if (args.includes('--login')) {
   loginAndSaveCookies().then(() => {
     console.log('Done! You can now run: node index.js');
+    process.exit(0);
   });
-} else if (args.includes('--check')) {
+} 
+else if (args.includes('--check')) {
   isSessionValid().then(valid => {
     console.log(valid ? '[OK] Session is valid' : '[FAIL] Session expired');
+    process.exit(0);
   });
-} else {
+} 
+else {
   runBackup().catch(err => {
     console.error('[FAIL] Backup failed:', err.message);
+    process.exit(1);
   });
 }
+
+
