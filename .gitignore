@@ -1,0 +1,13 @@
+# Secrets
+.env
+session-cookies.json
+
+# Downloads (large files)
+downloads/
+
+# Node modules
+node_modules/
+
+# Optional: exclude manifest if you don't want to track it
+
+backup-manifest.json

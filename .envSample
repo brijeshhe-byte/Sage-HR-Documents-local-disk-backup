@@ -1,0 +1,5 @@
+SAGEHR_BASE_URL=https://xyz.sage.hr
+SAGEHR_EMAIL=
+SAGEHR_PASSWORD=your_real_password_here
+SAGEHR_API_TOKEN=
+DOWNLOAD_DIR=
