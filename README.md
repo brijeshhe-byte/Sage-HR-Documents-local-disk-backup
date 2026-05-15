@@ -13,7 +13,7 @@ This tool solves that problem by:
 2. Using **Playwright** (a real browser) to download actual document files
 3. Organizing files into a clean folder structure: `Employee / Category / File`
 4. Supporting **incremental backups** (only new or updated documents)
-5. **Never deleting files** — old versions are kept with `_v1`, `_v2` naming
+5. **Never deleting files** 
 6. Detecting **category changes** and moving files (no duplicates)
 
 ---
